@@ -1,0 +1,25 @@
+Package: SAST
+Type: Package
+Title: Structure-Adaptive Sequential Testing for Online False Discovery Rate Control
+Version: 0.1.0
+Author: Weinan Wang
+Maintainer: Weinan Wang <wangweinan1115@gmail.com>
+Description: This R package carries out the SAST online FDR control procedure in Structure-Adaptive Sequential Testing for Online False Discovery Rate Control (2020).
+License: GPL (>=3)
+Encoding: UTF-8
+LazyData: true
+Imports:
+        kedd,
+        tidyverse,
+        dplyr,
+        jcolors,
+        onlineFDR,
+        pbmcapply,
+        reshape2,
+        gridExtra,
+        np,
+        snow,
+        stats,
+        knitr
+RoxygenNote: 7.1.1
+VignetteBuilder: knitr

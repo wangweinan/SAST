@@ -1,0 +1,196 @@
+---
+title: "Introduction to SAST"
+output: rmarkdown::html_document
+vignette: >
+  %\VignetteIndexEntry{Introduction to SAST}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+<style type="text/css">
+.main-container {
+  max-width: 1200px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.height=3,
+  fig.width=12
+)
+```
+
+# 1. Package Loading
+Here we load the essential packages for running this vignette. Specifically:
+
+* **SAST**: our main R package which contains the data-driven SAST procedure for online FDR control.
+* **tidyverse**: data-wrangling function used for processing.
+* **kedd**: used for cross-validated bandwidth determination.
+* **np**: for estimating conditional densities.
+* **onlineFDR**: onlineFDR R package, which includes multiple p-value based online FDR procedures, e.g. LORD, LOND, ADDIS, etc.
+* **pbmcapply, parallel**: parallel computing package.
+```{r setup, results='hide'}
+library(SAST)
+library(tidyverse)
+library(kedd)
+library(np)
+library(pbmcapply)
+library(onlineFDR)
+library(parallel)
+library(grid)
+library(gridExtra)
+library(reshape2)
+library(snow)
+library(jcolors)
+```
+
+# 2. Simulation
+In this section, we consider a basic simulation setting to demonstrate the usage of SAST. We also compare SAST with other online FDR methods, speicifically using the R package **onlineFDR**.
+
+## 2.1 Simulation Setting (constant signal proportion)
+We let $m=5000$, signal strength $\mu=2.6,2.8,3$ (small signal strength to demonstrate the power of our procedure), signal variance $\sigma^2=1$, constant $\pi_s=0.05$, number of iteration $200$, initial burn-in period to be $init=500$. FDR levels are evaluted from location 200 to 5000 with step-size 400. 
+
+Then we let the covariate bandwidth $h$ to be chosen by the **h.ccv** function, here it's $38.37824$.
+```{r simulation-setting}
+m <- 5000
+mu <- c(2.6,2.8,3)
+nCores <- detectCores()
+p <- rep(0.05,m)
+alpha <- 0.05
+nrep <- 200
+init <- 500
+t <- seq(200,m,400)
+grid <- expand.grid(mu,1:nrep)
+#h <- h.ccv(1:m)
+h <- 38.37824
+```
+
+## 2.2 Running Simulation
+We first write a small worker function that runs SAST, LOND, LORD++, and ASDDIS:
+```{r running-simulation, results='hide'}
+workerFunc <- function(m,mu,sigma=1,p,iter,alpha=0.05,init,t,h){
+  #Generate data
+  x.Obs <- x.Real <- rep(0,m)
+  #Ground Truths, p here is a vector of proportions
+  x.Real <- p %>% map_dbl(~sample(c(0,1),1,prob=c(1-.x,.x)))
+  theta <- x.Real*mu
+  #Observations for x
+  x.Obs <- theta %>% map_dbl(~rnorm(1,.x,sigma))
+  zval <- x.Obs/sigma
+  pval <- 2*pnorm(-abs(zval))
+  
+  res_SAST.raw <- SAST(zval,alpha,init,h=h,conservative=FALSE)
+  res_lond.raw <- LOND(pval,alpha)
+  res_lord_plus.raw <- LORD(pval,alpha)
+  res_addis.raw <- ADDIS(pval,alpha)
+  
+  res_lond <- t %>% map(~FDP_MDP(x.Real,res_lond.raw$R,.x)) %>% unlist %>% split(.,names(.))
+  res_lord_plus <- t %>% map(~FDP_MDP(x.Real,res_lord_plus.raw$R,.x)) %>% unlist %>% split(.,names(.))
+  res_addis <- t %>% map(~FDP_MDP(x.Real,res_addis.raw$R,.x)) %>% unlist %>% split(.,names(.))
+  res_SAST <- t %>% map(~FDP_MDP(x.Real,res_SAST.raw$decision,.x)) %>% unlist %>% split(.,names(.))
+  
+    return(list(mu=mu,iter=iter,t=t,
+              lond_FDP=res_lond$FDP,
+              lond_MDP=res_lond$MDP,
+              lord_plus_FDP=res_lord_plus$FDP,
+              lord_plus_MDP=res_lord_plus$MDP,
+              addis_FDP=res_addis$FDP,
+              addis_MDP=res_addis$MDP,
+              SAST_FDP=res_SAST$FDP,
+              SAST_MDP=res_SAST$MDP))
+}
+
+#function to generate legend for plot
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+
+# calculate FDP and MDP given the decision and the truth for data until time t
+FDP_MDP <- function(x.Real,dec,t){
+  if (sum(dec[1:t])!=0){
+    FDP <- sum((1-x.Real[1:t])*dec[1:t])/(sum(dec[1:t]))
+  } else {
+    FDP <- 0
+  }
+  if (sum(x.Real[1:t])!=0){
+    MDP <- sum(x.Real[1:t]*(1-dec[1:t]))/sum(x.Real[1:t])
+  } else {
+    MDP <- 0
+  }
+  return(list(FDP=FDP,MDP=MDP,t=t))
+}
+
+#res<-pbmcmapply(workerFunc,mu=grid[,1],iter=grid[,2],MoreArgs=list(m=m,p=p,init=init,t=t,h=h),mc.cores=1)
+cl <- makeCluster(nCores)
+clusterCall(cl,function(){
+library(SAST)
+library(tidyverse)
+library(kedd)
+library(np)
+library(pbmcapply)
+library(onlineFDR)
+library(parallel)
+library(grid)
+library(gridExtra)
+library(reshape2)
+library(snow)
+library(jcolors)
+})
+clusterCall(cl,assign,'FDP_MDP',FDP_MDP,envir=.GlobalEnv)
+res<-clusterMap(cl,workerFunc,mu=grid[,1],iter=grid[,2],MoreArgs=list(m=m,p=p,init=init,t=t,h=h))
+stopCluster(cl)
+```
+
+## 2.3 Results
+```{r plot}
+#cleaned_res<-as_tibble(t(res)) %>% unnest(mu,iter) %>% unnest()
+cleaned_res <-res %>% map_df(as_tibble)
+mean_res<-cleaned_res  %>%  group_by(mu,t) %>% dplyr::select(-c('iter')) %>% summarise_all(list(mean)) %>% group_by(mu,t)
+FDR_res <- dplyr::select(mean_res,contains("FDP"));
+MDR_res <- dplyr::select(mean_res,contains("MDP"));
+colnames(MDR_res) <- colnames(FDR_res) <- c('mu','t','LOND','LORD++','ADDIS','SAST')
+
+#Plotting FDR and MDR respectively
+res_FDR_long <- melt(FDR_res,id=c("mu","t"));
+res_MDR_long <- melt(MDR_res,id=c("mu","t"));
+
+p_FDR <- ggplot(data=res_FDR_long,aes(x=t,y=value,colour=factor(variable),shape=factor(variable)))+
+  geom_point(size=2.5)+
+  geom_line(size=1)+
+  facet_wrap(~mu,ncol=3,labeller=label_both)+
+  ylim(0,0.12)+
+  xlab(expression(t))+ylab("FDR")+
+  theme(legend.position="bottom")+
+  ggtitle("Intermediate FDR level Comparison")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+    panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(plot.title=element_text(hjust=0.5))+scale_color_jcolors(palette = "pal3")+
+  labs(color  = "Methods", linetype = "Methods", shape = "Methods")
+
+
+p_MDR <- ggplot(data=res_MDR_long,aes(x=t,y=value,colour=factor(variable),shape=factor(variable)))+
+  geom_point(size=2.5)+
+  geom_line(size=1)+
+  facet_wrap(~mu,ncol=3,labeller=label_both)+
+  ylim(0.5,1)+
+  xlab(expression(t))+ylab("MDR")+
+  theme(legend.position="none")+
+  ggtitle("Intermediate MDR level Comparison")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+    panel.background = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(plot.title=element_text(hjust=0.5))+scale_color_jcolors(palette = "pal3")
+
+mylegend <- g_legend(p_FDR);
+grid.arrange(arrangeGrob(p_FDR + theme(legend.position="none"),
+                         p_MDR + theme(legend.position="none"),
+                         ncol=2),
+             mylegend, nrow=2,heights=c(10, 1), top = "Methods Comparison (constant p 0.05)")
+```
+
+
+
+
